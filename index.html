@@ -102,9 +102,10 @@ canvas {
     <div class="menu-title">坦 克 大 战</div>
     <div class="menu-subtitle">BATTLE CITY</div>
     <button class="menu-btn" id="btnStart">开始游戏</button>
+    <button class="menu-btn" id="btnAutoPlay" style="border-color:#00ccff;color:#00ccff;">自动演示</button>
     <div class="controls-info">
       <span>↑ ↓ ← →</span> 或 <span>W A S D</span> 移动<br>
-      <span>空格</span> 发射子弹 &nbsp; <span>P</span> 暂停
+      <span>空格</span> 发射子弹 &nbsp; <span>P</span> 暂停 &nbsp; <span>O</span> 切换自动
     </div>
   </div>
 
@@ -171,6 +172,7 @@ const btnStart = document.getElementById('btnStart');
 const btnResume = document.getElementById('btnResume');
 const btnRestart = document.getElementById('btnRestart');
 const btnMenu = document.getElementById('btnMenu');
+const btnAutoPlay = document.getElementById('btnAutoPlay');
 
 // ====== GAME STATE ======
 let gameState = 'menu'; // menu | playing | paused | gameover
@@ -191,6 +193,7 @@ let spawnInterval = 180; // frames between spawns
 let playerFireCooldown = 0;
 let basePosition = { col: 12, row: 24 };
 let animationId = null;
+let autoPlay = false;
 
 // ====== MAP DEFINITIONS ======
 function createLevelMap() {
@@ -610,7 +613,12 @@ function drawHUD() {
   ctx.fillText(`第 ${level} 关`, 10, 20);
   ctx.fillText(`分数: ${score}`, 120, 20);
   ctx.textAlign = 'right';
-  ctx.fillText(`剩余敌人: ${enemiesRemaining}`, WIDTH - 120, 20);
+  ctx.fillText(`剩余敌人: ${enemiesRemaining}`, WIDTH - 140, 20);
+  if (autoPlay) {
+    ctx.fillStyle = '#00ccff';
+    ctx.textAlign = 'center';
+    ctx.fillText('🤖 自动演示中...', WIDTH / 2, 20);
+  }
 
   // Lives
   ctx.textAlign = 'right';
@@ -771,6 +779,104 @@ function updateBullets() {
   bullets = bullets.filter(b => b.active);
 }
 
+function autoPlayAI() {
+  const px = player.x + TANK_HALF;
+  const py = player.y + TANK_HALF;
+
+  // Find nearest alive enemy
+  let nearest = null, nearestDist = Infinity;
+  for (const e of enemies) {
+    if (e.exploding) continue;
+    const ex = e.x + TANK_HALF;
+    const ey = e.y + TANK_HALF;
+    const d = Math.sqrt((px-ex)**2 + (py-ey)**2);
+    if (d < nearestDist) { nearestDist = d; nearest = e; }
+  }
+
+  // Detect incoming bullets
+  let dodgeDir = -1;
+  for (const b of bullets) {
+    if (b.isPlayer || !b.active) continue;
+    const bx = b.x, by = b.y;
+    const dist = Math.sqrt((px-bx)**2 + (py-by)**2);
+    if (dist < 80) {
+      // Check if bullet is heading toward us
+      const futureBx = bx + (b.dir===DIR_RIGHT?30:b.dir===DIR_LEFT?-30:0);
+      const futureBy = by + (b.dir===DIR_DOWN?30:b.dir===DIR_UP?-30:0);
+      const futureDist = Math.sqrt((px-futureBx)**2 + (py-futureBy)**2);
+      if (futureDist < dist && dist < 60) {
+        if (b.dir === DIR_UP || b.dir === DIR_DOWN) {
+          dodgeDir = Math.abs(px - bx) < 20 ? (px > WIDTH/2 ? DIR_LEFT : DIR_RIGHT) : -1;
+        } else {
+          dodgeDir = Math.abs(py - by) < 20 ? (py > HEIGHT/2 ? DIR_UP : DIR_DOWN) : -1;
+        }
+      }
+    }
+  }
+
+  let moveDir = player.dir;
+  let shouldFire = false;
+
+  if (nearest) {
+    const ex = nearest.x + TANK_HALF;
+    const ey = nearest.y + TANK_HALF;
+    const dx = ex - px;
+    const dy = ey - py;
+    const alignedX = Math.abs(dy) < 14;
+    const alignedY = Math.abs(dx) < 14;
+
+    // Shoot when aligned
+    if (alignedX) {
+      moveDir = dx > 0 ? DIR_RIGHT : DIR_LEFT;
+      shouldFire = true;
+    } else if (alignedY) {
+      moveDir = dy > 0 ? DIR_DOWN : DIR_UP;
+      shouldFire = true;
+    } else {
+      // Move to align - prefer longer axis
+      if (Math.abs(dx) > Math.abs(dy)) {
+        moveDir = dx > 0 ? DIR_RIGHT : DIR_LEFT;
+      } else {
+        moveDir = dy > 0 ? DIR_DOWN : DIR_UP;
+      }
+    }
+
+    // Override with dodge if needed
+    if (dodgeDir >= 0) moveDir = dodgeDir;
+  } else {
+    // Patrol near base
+    const bx = (basePosition.col + 0.5) * CELL;
+    const by = (basePosition.row - 2) * CELL;
+    if (Math.abs(px - bx) > 40) {
+      moveDir = px > bx ? DIR_LEFT : DIR_RIGHT;
+    } else {
+      moveDir = frameCount % 120 < 60 ? DIR_UP : DIR_DOWN;
+    }
+  }
+
+  // Check if move direction is blocked, try alternates
+  const alternates = [moveDir, (moveDir+1)%4, (moveDir+3)%4, (moveDir+2)%4];
+  moveDir = alternates[0];
+  for (const dir of alternates) {
+    let tx = player.x, ty = player.y;
+    switch (dir) {
+      case DIR_UP: ty -= TANK_SPEED; break;
+      case DIR_DOWN: ty += TANK_SPEED; break;
+      case DIR_LEFT: tx -= TANK_SPEED; break;
+      case DIR_RIGHT: tx += TANK_SPEED; break;
+    }
+    if (!collideWithTile(tx, ty, TANK_SIZE, TANK_SIZE) &&
+        !collideWithTile(tx+TANK_SIZE-1, ty, 1, TANK_SIZE) &&
+        !collideWithTile(tx, ty+TANK_SIZE-1, TANK_SIZE, 1) &&
+        !collideWithTank(tx, ty, TANK_SIZE, TANK_SIZE, player)) {
+      moveDir = dir;
+      break;
+    }
+  }
+
+  return { moveDir, shouldFire };
+}
+
 function updatePlayer() {
   if (!player || player.exploding) return;
 
@@ -781,11 +887,24 @@ function updatePlayer() {
   // Movement
   let dx = 0, dy = 0;
   let newDir = player.dir;
+  let wantFire = false;
 
-  if (keys['ArrowUp'] || keys['KeyW']) { dy = -TANK_SPEED; newDir = DIR_UP; }
-  else if (keys['ArrowDown'] || keys['KeyS']) { dy = TANK_SPEED; newDir = DIR_DOWN; }
-  else if (keys['ArrowLeft'] || keys['KeyA']) { dx = -TANK_SPEED; newDir = DIR_LEFT; }
-  else if (keys['ArrowRight'] || keys['KeyD']) { dx = TANK_SPEED; newDir = DIR_RIGHT; }
+  if (autoPlay) {
+    const ai = autoPlayAI();
+    newDir = ai.moveDir;
+    wantFire = ai.shouldFire;
+    switch (newDir) {
+      case DIR_UP: dy = -TANK_SPEED; break;
+      case DIR_DOWN: dy = TANK_SPEED; break;
+      case DIR_LEFT: dx = -TANK_SPEED; break;
+      case DIR_RIGHT: dx = TANK_SPEED; break;
+    }
+  } else {
+    if (keys['ArrowUp'] || keys['KeyW']) { dy = -TANK_SPEED; newDir = DIR_UP; }
+    else if (keys['ArrowDown'] || keys['KeyS']) { dy = TANK_SPEED; newDir = DIR_DOWN; }
+    else if (keys['ArrowLeft'] || keys['KeyA']) { dx = -TANK_SPEED; newDir = DIR_LEFT; }
+    else if (keys['ArrowRight'] || keys['KeyD']) { dx = TANK_SPEED; newDir = DIR_RIGHT; }
+  }
 
   player.dir = newDir;
 
@@ -810,7 +929,7 @@ function updatePlayer() {
   }
 
   // Fire
-  if (keys['Space'] && playerFireCooldown <= 0) {
+  if ((wantFire || keys['Space']) && playerFireCooldown <= 0) {
     const bullet = fireBullet(player, true);
     if (bullet) {
       bullets.push(bullet);
@@ -1018,6 +1137,11 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
   }
 
+  if (e.code === 'KeyO' && gameState === 'playing') {
+    autoPlay = !autoPlay;
+    e.preventDefault();
+  }
+
   if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) {
     e.preventDefault();
   }
@@ -1049,9 +1173,18 @@ btnRestart.addEventListener('click', () => {
 
 btnMenu.addEventListener('click', () => {
   gameState = 'menu';
+  autoPlay = false;
   gameOverOverlay.classList.add('hidden');
   pauseOverlay.classList.add('hidden');
   menuOverlay.classList.remove('hidden');
+});
+
+btnAutoPlay.addEventListener('click', () => {
+  resetGame();
+  autoPlay = true;
+  gameState = 'playing';
+  menuOverlay.classList.add('hidden');
+  gameOverOverlay.classList.add('hidden');
 });
 
 // ====== INIT ======
